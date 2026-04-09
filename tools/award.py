@@ -86,20 +86,23 @@ async def _award_search_monthly(
     bid_no: Optional[str],
     months_back: int,
 ) -> list[dict]:
-    """월별 분할 낙찰현황 조회"""
+    """월별 분할 낙찰현황 조회 — 병렬 처리로 속도 최적화"""
     from datetime import datetime, timedelta
 
     now = datetime.now()
-    all_items: list[dict] = []
-    seen_ids: set[str] = set()
+    months_back = min(months_back, 48)
 
-    for m in range(min(months_back, 48)):
+    # 월별 날짜 범위 목록 생성
+    month_ranges = []
+    for m in range(months_back):
         target = now.replace(day=1) - timedelta(days=1)
         for _ in range(m):
             target = target.replace(day=1) - timedelta(days=1)
         year, month = target.year, target.month
         last_day = calendar.monthrange(year, month)[1]
+        month_ranges.append((year, month, last_day))
 
+    async def _fetch_one(year: int, month: int, last_day: int) -> list[dict]:
         params: dict = {
             "numOfRows": 100,
             "inqryDiv":  "1",
@@ -110,16 +113,26 @@ async def _award_search_monthly(
             params["bidNtceNm"] = keyword
         if bid_no:
             params["bidNtceNo"] = bid_no
-
         try:
             result = await fetch(ENDPOINTS["award"], op, params)
-            for item in result.get("items", []):
+            return result.get("items", [])
+        except Exception:
+            return []
+
+    # 병렬 실행 (최대 12개월씩 묶어서 → API 과부하 방지)
+    all_items: list[dict] = []
+    seen_ids: set[str] = set()
+    chunk_size = 12
+
+    for i in range(0, len(month_ranges), chunk_size):
+        chunk = month_ranges[i:i + chunk_size]
+        results = await asyncio.gather(*[_fetch_one(*r) for r in chunk])
+        for items in results:
+            for item in items:
                 uid = item.get("bidNtceNo", "") + item.get("bidNtceOrd", "")
                 if uid and uid not in seen_ids:
                     seen_ids.add(uid)
                     all_items.append(item)
-        except Exception:
-            continue
 
     return all_items
 

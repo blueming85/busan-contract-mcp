@@ -398,20 +398,23 @@ def _format_company_list(result: dict) -> str:
     lines = [result.get("summary", ""), ""]
 
     def _fmt_vendor(rank: int, c: dict) -> str:
-        tag_str  = f" [{', '.join(c['우대구분'])}]" if c.get("우대구분") else ""
-        rel_icon = "★" if c.get("업종관련성") == "높음" else "·"
-        industry_str = ", ".join(c.get("등록업종", [])[:2]) or "업종 미확인"
-        badge    = c.get("제재상태", {}).get("badge", "🟢")
-        label    = c.get("제재상태", {}).get("label", "이상없음")
-        detail   = c.get("제재상태", {}).get("detail", "")
-        src      = " [계약이력]" if c.get("출처") == "계약이력" else ""
-        score    = c.get("점수", 0)
+        badge  = c.get("제재상태", {}).get("badge", "🟢")
+        label  = c.get("제재상태", {}).get("label", "이상없음")
+        detail = c.get("제재상태", {}).get("detail", "")
+        score  = c.get("점수", 0)
+        cnt    = c.get("낙찰횟수", 0)
+        avg    = c.get("평균낙찰금액", "")
+        latest = c.get("최근낙찰일", "")
+        rate   = c.get("낙찰률", "")
+        inst   = c.get("발주기관", "")
 
         row = (
-            f"{rank}. {badge} {rel_icon} {c.get('업체명', '')}{tag_str}{src}  (점수:{score})\n"
+            f"{rank}. {badge} {c.get('업체명', '')}  (점수:{score} | 낙찰{cnt}회)\n"
             f"   제재: {label}" + (f" — {detail}" if detail else "") + "\n"
-            f"   주소: {c.get('주소', '')} | 대표: {c.get('대표자', '')} | 전화: {c.get('전화번호', '')}\n"
-            f"   업종: {industry_str}"
+            f"   주소: {c.get('주소', '')}\n"
+            f"   평균낙찰가: {avg}" + (f" | 낙찰률: {rate}%" if rate else "")
+            + (f" | 최근: {latest}" if latest else "") + "\n"
+            f"   수행기관: {inst}"
         )
         return row
 
