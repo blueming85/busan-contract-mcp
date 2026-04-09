@@ -1,10 +1,19 @@
 import os
+from pathlib import Path
+
+# .env 파일 자동 로드 (python-dotenv 없이 직접 파싱)
+_env_path = Path(__file__).parent / ".env"
+if _env_path.exists():
+    for line in _env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
 
 # 공공데이터포털 서비스 키
-SERVICE_KEY = os.environ.get(
-    "NARA_SERVICE_KEY",
-    "7db9147f9b8e4eff41f27653c73002ec2d3d4054d863a74ae1e7fdd561a7ea62"
-)
+SERVICE_KEY = os.environ.get("NARA_SERVICE_KEY", "")
+if not SERVICE_KEY:
+    raise RuntimeError(".env 파일에 NARA_SERVICE_KEY를 설정해주세요.")
 
 # 나라장터 API Base URL
 BASE_URL = "http://apis.data.go.kr/1230000"
