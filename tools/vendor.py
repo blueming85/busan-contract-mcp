@@ -67,30 +67,35 @@ def _shrink_keyword(keyword: str) -> list[str]:
     return result[:4]
 
 
-def _build_ai_suggestion(keyword: str) -> dict:
-    """AI 관련 용역 — 재검색 제안 응답 생성"""
+def _build_no_result_suggestion(keyword: str, is_ai: bool) -> dict:
+    """검색 결과 없을 때 — 재검색 제안 응답 생성"""
     shrunk = _shrink_keyword(keyword)
     core_kw = shrunk[0] if shrunk else keyword
 
+    ai_hint = (
+        f"\n💡 AI·인공지능은 공고명보다 RFP 조건에 명시되는 경우가 많아\n"
+        f"   '공공 AI', 'AI활용', '스마트' 등으로 검색하면 더 많이 나옵니다.\n"
+    ) if is_ai else ""
+
     return {
-        "keyword":      keyword,
-        "region":       "",
-        "group_a":      [],
-        "group_b":      [],
-        "companies":    [],
-        "fallback":     True,
-        "ai_guidance":  True,
-        "core_keyword": core_kw,
+        "keyword":         keyword,
+        "region":          "",
+        "group_a":         [],
+        "group_b":         [],
+        "companies":       [],
+        "fallback":        True,
+        "ai_guidance":     True,
+        "core_keyword":    core_kw,
         "shrunk_keywords": shrunk,
         "summary": (
-            f"🤖 AI 관련 용역은 나라장터에 직접 등록된 사례가 없습니다.\n"
-            f"(AI·인공지능은 업체 분류 기준이 아닌 용역 조건이기 때문)\n\n"
+            f"🔍 '{keyword}'로 검색된 낙찰 사례가 없습니다.\n"
+            f"{ai_hint}\n"
             f"다음 중 원하시는 방식으로 다시 검색해보세요:\n\n"
             f"① 핵심 업무 기준 →  '{core_kw}' 전문업체 조회\n"
-            f"   (AI 기술 보유 여부는 RFP 제안요청서에 조건으로 명시)\n\n"
-            f"② 유사 키워드 조회 → {', '.join(shrunk[:3])}\n\n"
-            f"③ 두 가지 모두 조회\n\n"
-            f"어떻게 진행할까요? (①/②/③)"
+            f"   (AI·신기술 보유 여부는 RFP 제안요청서에 조건으로 명시)\n\n"
+            f"② 유사 키워드 → {', '.join(shrunk[:3])}\n\n"
+            + (f"③ AI 공공사업 검색 → 'AI활용', '공공AI', 'AI디지털'\n\n" if is_ai else "")
+            + f"어떻게 진행할까요?"
         ),
     }
 
@@ -301,9 +306,9 @@ async def search_companies(
 
     # ── 2단계: 0건 처리 ──
     if not companies:
-        # AI/신기술 키워드 감지 → 자동 진행 전에 제안 응답 반환
+        # AI/신기술 키워드 감지 → 자동 fallback 전에 제안 응답 반환
         if _is_ai_related(service_keyword):
-            return _build_ai_suggestion(service_keyword)
+            return _build_no_result_suggestion(service_keyword, is_ai=True)
 
         # 일반 키워드 — 자동 축소 fallback (최대 24개월로 속도 제한)
         fallback_months = min(months_back, 24)
@@ -323,19 +328,7 @@ async def search_companies(
     debarred_all = await debarred_task
 
     if not companies:
-        return {
-            "keyword":    service_keyword,
-            "region":     region or "전국",
-            "group_a":    [],
-            "group_b":    [],
-            "companies":  [],
-            "fallback":   True,
-            "summary": (
-                f"⚠️ '{service_keyword}' 관련 낙찰 사례가 나라장터에 없습니다.\n"
-                f"신규 유형 용역으로 기초금액은 원가계산 방식(엔지니어링 대가기준) 적용을 권장합니다.\n"
-                f"유사 키워드: {', '.join(_shrink_keyword(service_keyword))}"
-            ),
-        }
+        return _build_no_result_suggestion(service_keyword, is_ai=_is_ai_related(service_keyword))
 
     # ── 점수 계산 ──
     for c in companies:
