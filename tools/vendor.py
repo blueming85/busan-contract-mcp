@@ -16,47 +16,83 @@ from tools.api_client import fetch, parse_amount, format_amount
 # 키워드 자동 축소
 # ─────────────────────────────────────────────
 
+# AI/신기술 관련 키워드 목록
+_AI_KEYWORDS = {"AI", "인공지능", "딥러닝", "머신러닝", "빅데이터", "스마트", "지능형",
+                "IoT", "디지털트윈", "디지털 트윈", "블록체인", "클라우드", "자율"}
+
+
+def _is_ai_related(keyword: str) -> bool:
+    """AI/신기술 관련 키워드 포함 여부"""
+    for ak in _AI_KEYWORDS:
+        if ak.lower() in keyword.lower():
+            return True
+    return False
+
+
 def _shrink_keyword(keyword: str) -> list[str]:
     """
     사례 없을 때 단계별 축소 키워드 생성
     "땅꺼짐 예방을 위한 AI 계측관리 연구개발"
-      → ["AI 계측관리", "계측관리", "지반계측", "스마트 계측"]
+      → ["AI 계측관리", "계측관리", "지반계측"]
     """
     kw = keyword.strip()
     candidates = []
 
-    # 1. 조사/접속사 제거 후 명사 2개 조합
+    # AI 키워드 제거 후 핵심 명사 추출
+    ai_removed = kw
+    for ak in _AI_KEYWORDS:
+        ai_removed = ai_removed.replace(ak, "").strip()
+
     stopwords = ["을 위한", "에 대한", "을 위해", "를 위한", "에 관한",
-                 "연구개발", "연구용역", "학술용역", "기초연구"]
-    cleaned = kw
+                 "연구개발", "연구용역", "학술용역", "기초연구", "예방", "방지"]
+    cleaned = ai_removed
     for sw in stopwords:
         cleaned = cleaned.replace(sw, " ")
     parts = [p.strip() for p in cleaned.split() if len(p.strip()) >= 2]
 
-    # 핵심 명사 2개 조합
     if len(parts) >= 2:
-        candidates.append(" ".join(parts[-2:]))   # 뒤 2개 (보통 핵심)
-        candidates.append(" ".join(parts[:2]))     # 앞 2개
-    # 핵심 명사 1개
-    if len(parts) >= 1:
-        candidates.append(parts[-1])              # 마지막 단어
+        candidates.append(" ".join(parts[-2:]))
+        candidates.append(" ".join(parts[:2]))
+    if parts:
+        candidates.append(parts[-1])
         if len(parts) >= 2:
             candidates.append(parts[-2])
 
-    # 2. 공백 제거
-    for c in candidates[:]:
-        no_sp = c.replace(" ", "")
-        if no_sp != c and no_sp not in candidates:
-            candidates.append(no_sp)
-
-    # 중복 제거, 원본 제외, 최대 5개
     seen = {kw}
     result = []
     for c in candidates:
         if c and c not in seen and len(c) >= 2:
             seen.add(c)
             result.append(c)
-    return result[:5]
+    return result[:4]
+
+
+def _build_ai_suggestion(keyword: str) -> dict:
+    """AI 관련 용역 — 재검색 제안 응답 생성"""
+    shrunk = _shrink_keyword(keyword)
+    core_kw = shrunk[0] if shrunk else keyword
+
+    return {
+        "keyword":      keyword,
+        "region":       "",
+        "group_a":      [],
+        "group_b":      [],
+        "companies":    [],
+        "fallback":     True,
+        "ai_guidance":  True,
+        "core_keyword": core_kw,
+        "shrunk_keywords": shrunk,
+        "summary": (
+            f"🤖 AI 관련 용역은 나라장터에 직접 등록된 사례가 없습니다.\n"
+            f"(AI·인공지능은 업체 분류 기준이 아닌 용역 조건이기 때문)\n\n"
+            f"다음 중 원하시는 방식으로 다시 검색해보세요:\n\n"
+            f"① 핵심 업무 기준 →  '{core_kw}' 전문업체 조회\n"
+            f"   (AI 기술 보유 여부는 RFP 제안요청서에 조건으로 명시)\n\n"
+            f"② 유사 키워드 조회 → {', '.join(shrunk[:3])}\n\n"
+            f"③ 두 가지 모두 조회\n\n"
+            f"어떻게 진행할까요? (①/②/③)"
+        ),
+    }
 
 
 # ─────────────────────────────────────────────
@@ -263,12 +299,18 @@ async def search_companies(
     fallback_keyword = None
     fallback_note = ""
 
-    # ── 2단계: 0건이면 키워드 자동 축소 ──
+    # ── 2단계: 0건 처리 ──
     if not companies:
+        # AI/신기술 키워드 감지 → 자동 진행 전에 제안 응답 반환
+        if _is_ai_related(service_keyword):
+            return _build_ai_suggestion(service_keyword)
+
+        # 일반 키워드 — 자동 축소 fallback (최대 24개월로 속도 제한)
+        fallback_months = min(months_back, 24)
         shrunk = _shrink_keyword(service_keyword)
         for alt_kw in shrunk:
             companies = await _get_awardees_from_history(
-                alt_kw, biz_type, months_back, region
+                alt_kw, biz_type, fallback_months, region
             )
             if companies:
                 fallback_keyword = alt_kw

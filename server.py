@@ -389,6 +389,10 @@ def _format_voluntary_check(result: dict) -> str:
 
 
 def _format_company_list(result: dict) -> str:
+    # AI 관련 용역 안내 응답
+    if result.get("ai_guidance"):
+        return result.get("summary", "")
+
     group_a = result.get("group_a", [])
     group_b = result.get("group_b", [])
 
