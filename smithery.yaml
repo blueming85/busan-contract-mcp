@@ -1,0 +1,46 @@
+name: busan-contract-mcp
+displayName: 나라장터 조달 컨설팅 MCP
+description: |
+  나라장터 OpenAPI 기반 지능형 조달 컨설팅 MCP 서버.
+  전국 지방자치단체·공공기관 공무원이 계약 업무에 바로 활용할 수 있습니다.
+
+  주요 기능:
+  - 입찰공고 검색 (키워드 자동 변형으로 누락 방지)
+  - 낙찰결과 및 계약 전 과정 조회 (사전규격→낙찰→계약 한번에)
+  - 지역 소재 업체 추천 (부정당제재 신호등 포함, 그룹A/B 분류)
+  - 수의계약 가능 여부 자동 검토 (지방계약법 시행령 기준)
+  - 적정 기초금액 벤치마크 분석 (최근 3년 낙찰가 기반)
+  - 업체 부정당제재 이력 조회
+
+  API 키는 공공데이터포털(data.go.kr)에서 무료로 발급받을 수 있습니다.
+license: MIT
+category: government
+tags:
+  - korea
+  - procurement
+  - government
+  - contract
+  - g2b
+  - 나라장터
+  - 조달
+  - 공공계약
+
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required:
+      - nara_service_key
+    properties:
+      nara_service_key:
+        type: string
+        title: 나라장터 API 서비스 키
+        description: 공공데이터포털(data.go.kr)에서 발급받은 서비스 키 (무료)
+  commandFunction: |-
+    (config) => ({
+      command: "python",
+      args: ["server.py"],
+      env: {
+        NARA_SERVICE_KEY: config.nara_service_key
+      }
+    })

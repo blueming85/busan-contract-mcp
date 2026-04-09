@@ -18,7 +18,7 @@ from tools.contract import (
     check_voluntary_contract,
 )
 from tools.bid import search_bid_announcements
-from tools.vendor import search_busan_companies, check_debarred_vendors
+from tools.vendor import search_companies, search_busan_companies, check_debarred_vendors
 from tools.award import get_bid_award_result, get_contract_process
 
 app = Server("busan-contract-mcp")
@@ -147,33 +147,42 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="search_busan_companies",
+            name="search_companies",
             description=(
-                "부산 지역 업체를 검색하고, 해당 용역 면허 보유 여부와 계약 이력을 통합 제공합니다. "
-                "'이 용역 할 수 있는 부산 업체 뽑아줘'라는 질문에 답합니다. "
-                "여성기업·장애인기업·사회적기업 등 우대 업체를 자동으로 상단에 배치합니다."
+                "나라장터 등록 업체를 검색하고 전문성·부정당제재·우대사항 점수로 추천합니다. "
+                "'이 용역 할 수 있는 업체 뽑아줘' 질문에 답합니다. "
+                "기본값은 부산 우선(그룹A) + 타 지역 우수(그룹B) 분리 추천입니다. "
+                "region을 변경하면 서울·경기 등 다른 지역 우선 추천도 가능하고, "
+                "region을 생략하면 전국 단일 랭킹으로 조회합니다. "
+                "여성기업·장애인기업·사회적기업 등 우대 업체를 자동으로 상단 배치하며 "
+                "부정당제재 여부(🔴/🟡/🟢)를 자동으로 함께 확인합니다."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "service_keyword": {
                         "type": "string",
-                        "description": "용역/물품 종류 키워드 (예: '청소', '소프트웨어', '경비', '시설관리')",
+                        "description": "용역/물품 종류 키워드 (예: '사전타당성조사', '청소', '소프트웨어', '시설관리')",
                     },
                     "biz_type": {
                         "type": "string",
                         "enum": ["용역", "물품", "공사"],
                         "default": "용역",
                     },
+                    "region": {
+                        "type": "string",
+                        "description": "지역 우선 필터 (기본: '부산'). 전국 단일 랭킹 원할 시 null 전달. 예: '서울', '경기', '인천'",
+                        "default": "부산",
+                    },
                     "prefer_local_economy": {
                         "type": "boolean",
-                        "description": "우대기업 상단 배치 여부 (기본: true)",
+                        "description": "지역 우선 그룹화 여부 (region 지정 시 유효, 기본: true)",
                         "default": True,
                     },
                     "page_size": {"type": "integer", "default": 30},
                     "top_n": {
                         "type": "integer",
-                        "description": "최종 추천 업체 수 (기본 10, 그룹A:그룹B = 5:5)",
+                        "description": "최종 추천 업체 수 (기본 10, region 지정 시 절반씩 그룹A/B)",
                         "default": 10,
                     },
                 },
@@ -254,8 +263,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result = await check_debarred_vendors(**arguments)
             text = result.get("message", "") + "\n" + json.dumps(result.get("items", []), ensure_ascii=False, indent=2)
 
-        elif name == "search_busan_companies":
-            result = await search_busan_companies(**arguments)
+        elif name in ("search_companies", "search_busan_companies"):
+            if name == "search_busan_companies":
+                arguments.setdefault("region", "부산")
+            result = await search_companies(**arguments)
             text = _format_company_list(result)
 
         elif name == "get_bid_award_result":
@@ -404,9 +415,13 @@ def _format_company_list(result: dict) -> str:
         )
         return row
 
+    region_label = result.get("region", "부산")
     if group_a:
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append("🏙️  그룹 A — 부산 소재 업체 (지역경제 우선)")
+        if group_b:
+            lines.append(f"🏙️  그룹 A — {region_label} 소재 업체 (지역경제 우선)")
+        else:
+            lines.append(f"🌐  전국 추천 업체 ({region_label})")
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         for i, c in enumerate(group_a, 1):
             lines.append(_fmt_vendor(i, c))
@@ -414,7 +429,7 @@ def _format_company_list(result: dict) -> str:
 
     if group_b:
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append("🌐  그룹 B — 관외 우수 업체 (전문성 상위)")
+        lines.append("🌐  그룹 B — 타 지역 우수 업체 (전문성 상위)")
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         offset = len(group_a)
         for i, c in enumerate(group_b, offset + 1):
