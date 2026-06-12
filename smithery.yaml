@@ -36,11 +36,21 @@ startCommand:
         type: string
         title: 나라장터 API 서비스 키
         description: 공공데이터포털(data.go.kr)에서 발급받은 서비스 키 (무료)
+      law_api_id:
+        type: string
+        title: 법제처 API ID (선택)
+        description: 미입력 시 공유 키 자동 사용. 직접 발급은 open.law.go.kr
+      law_api_oc:
+        type: string
+        title: 법제처 API OC 키 (선택)
+        description: 미입력 시 공유 키 자동 사용
   commandFunction: |-
     (config) => ({
       command: "python",
       args: ["server.py"],
       env: {
-        NARA_SERVICE_KEY: config.nara_service_key
+        NARA_SERVICE_KEY: config.nara_service_key,
+        ...(config.law_api_id  ? { LAW_API_ID: config.law_api_id }  : {}),
+        ...(config.law_api_oc  ? { LAW_API_OC: config.law_api_oc }  : {}),
       }
     })

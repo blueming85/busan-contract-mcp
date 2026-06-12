@@ -2,7 +2,6 @@ __pycache__/
 *.pyc
 *.pyo
 .env
-config.py
 claude_desktop_config.json
 deploy_to_github.py
 .venv/
@@ -11,3 +10,6 @@ venv/
 dist/
 build/
 .DS_Store
+
+# 대용량 원본 데이터는 압축본(.json.gz)만 커밋
+data/*.json

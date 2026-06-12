@@ -4,7 +4,6 @@
 - search_bid_by_date: 날짜 기반 검색 (기존 방식, 빠름)
 """
 import re
-import calendar
 import asyncio
 from typing import Optional
 from config import ENDPOINTS
@@ -129,20 +128,10 @@ async def _search_single_keyword(
     op: str,
     months_back: int,
 ) -> list[dict]:
-    """단일 키워드 + 월별 분할 PPSSrch (내부 헬퍼)"""
-    from datetime import datetime, timedelta
+    """단일 키워드 + 월별 분할 PPSSrch — 월 단위 병렬 조회 (내부 헬퍼)"""
+    from tools.api_client import ApiKeyError, month_ranges
 
-    now = datetime.now()
-    all_items: list[dict] = []
-    seen_ids: set[str] = set()
-
-    for m in range(min(months_back, 30)):
-        target = now.replace(day=1) - timedelta(days=1)
-        for _ in range(m):
-            target = target.replace(day=1) - timedelta(days=1)
-        year, month = target.year, target.month
-        last_day = calendar.monthrange(year, month)[1]
-
+    async def _fetch_month(year: int, month: int, last_day: int) -> list[dict]:
         params = {
             "numOfRows": 100,
             "bidNtceNm": keyword,
@@ -152,14 +141,25 @@ async def _search_single_keyword(
         }
         try:
             result = await fetch(ENDPOINTS["bid"], op, params)
-            for item in result.get("items", []):
-                uid = item.get("bidNtceNo", "") + item.get("bidNtceOrd", "")
-                if uid and uid not in seen_ids:
-                    seen_ids.add(uid)
-                    item["_matched_keyword"] = keyword
-                    all_items.append(item)
+            return result.get("items", [])
+        except ApiKeyError:
+            raise
         except Exception:
-            continue
+            return []
+
+    results = await asyncio.gather(
+        *[_fetch_month(*r) for r in month_ranges(months_back, cap=30)]
+    )
+
+    all_items: list[dict] = []
+    seen_ids: set[str] = set()
+    for items in results:
+        for item in items:
+            uid = item.get("bidNtceNo", "") + item.get("bidNtceOrd", "")
+            if uid and uid not in seen_ids:
+                seen_ids.add(uid)
+                item["_matched_keyword"] = keyword
+                all_items.append(item)
 
     return all_items
 
@@ -248,6 +248,12 @@ async def _search_by_keyword(
     tasks = [_search_single_keyword(v, op, months_back) for v in variants]
     per_variant = await asyncio.gather(*tasks, return_exceptions=True)
 
+    # 인증 오류는 '0건'으로 위장하지 않고 그대로 알림
+    from tools.api_client import ApiKeyError
+    key_err = next((r for r in per_variant if isinstance(r, ApiKeyError)), None)
+    if key_err:
+        raise key_err
+
     # 결과 합산 — bidNtceNo+bidNtceOrd 기준 중복 제거
     all_items_map: dict[str, dict] = {}
     variant_stats: list[str] = []
@@ -307,7 +313,7 @@ async def _search_by_date(
     max_amount: Optional[int],
     page_size: int,
 ) -> dict:
-    """날짜 기반 고속 검색 (기본 최근 3개월)"""
+    """날짜 기반 검색 (기본 최근 3개월) — API 조회기간 1개월 제한으로 월 단위 분할 병렬 조회"""
     from datetime import datetime, timedelta
 
     ops = {
@@ -324,14 +330,38 @@ async def _search_by_date(
     if not end_date:
         end_date = now.strftime("%Y%m%d2359")
 
-    params = {
-        "numOfRows": page_size,
-        "inqryDiv":  "1",
-        "inqryBgnDt": start_date,
-        "inqryEndDt": end_date,
-    }
-    result = await fetch(ENDPOINTS["bid"], op, params)
-    items = result["items"]
+    # 요청 범위를 1개월 이하 창으로 분할
+    bgn = datetime.strptime(start_date[:8], "%Y%m%d")
+    end = datetime.strptime(end_date[:8], "%Y%m%d")
+    windows: list[tuple[str, str]] = []
+    cur = bgn
+    while cur <= end:
+        nxt = min(cur + timedelta(days=29), end)
+        w_bgn = cur.strftime("%Y%m%d") + (start_date[8:12] if cur == bgn else "0000")
+        w_end = nxt.strftime("%Y%m%d") + (end_date[8:12] if nxt == end else "2359")
+        windows.append((w_bgn, w_end))
+        cur = nxt + timedelta(days=1)
+
+    async def _fetch_window(w_bgn: str, w_end: str) -> dict:
+        params = {
+            "numOfRows": page_size,
+            "inqryDiv":  "1",
+            "inqryBgnDt": w_bgn,
+            "inqryEndDt": w_end,
+        }
+        return await fetch(ENDPOINTS["bid"], op, params)
+
+    results = await asyncio.gather(*[_fetch_window(*w) for w in windows])
+
+    total_count = sum(r["totalCount"] for r in results)
+    items: list[dict] = []
+    seen_ids: set[str] = set()
+    for r in results:
+        for item in r["items"]:
+            uid = item.get("bidNtceNo", "") + item.get("bidNtceOrd", "")
+            if not uid or uid not in seen_ids:
+                seen_ids.add(uid)
+                items.append(item)
 
     if inst_name:
         items = [i for i in items if inst_name in (i.get("ntceInsttNm") or "")]
@@ -346,7 +376,7 @@ async def _search_by_date(
 
     simplified = [_build_bid_item(i) for i in items]
     return {
-        "totalCount":   result["totalCount"],
+        "totalCount":   total_count,
         "matchedCount": len(simplified),
         "items":        simplified,
     }

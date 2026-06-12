@@ -5,7 +5,6 @@
 - get_contract_process  : 공고번호로 전체 계약 과정 조회 (사전규격→낙찰→계약)
 """
 import asyncio
-import calendar
 from typing import Optional
 from config import ENDPOINTS
 from tools.api_client import fetch, parse_amount, format_amount
@@ -86,21 +85,8 @@ async def _award_search_monthly(
     bid_no: Optional[str],
     months_back: int,
 ) -> list[dict]:
-    """월별 분할 낙찰현황 조회 — 병렬 처리로 속도 최적화"""
-    from datetime import datetime, timedelta
-
-    now = datetime.now()
-    months_back = min(months_back, 48)
-
-    # 월별 날짜 범위 목록 생성
-    month_ranges = []
-    for m in range(months_back):
-        target = now.replace(day=1) - timedelta(days=1)
-        for _ in range(m):
-            target = target.replace(day=1) - timedelta(days=1)
-        year, month = target.year, target.month
-        last_day = calendar.monthrange(year, month)[1]
-        month_ranges.append((year, month, last_day))
+    """월별 분할 낙찰현황 조회 — 병렬 처리 (동시성은 api_client 전역 세마포어가 제한)"""
+    from tools.api_client import ApiKeyError, month_ranges
 
     async def _fetch_one(year: int, month: int, last_day: int) -> list[dict]:
         params: dict = {
@@ -116,23 +102,23 @@ async def _award_search_monthly(
         try:
             result = await fetch(ENDPOINTS["award"], op, params)
             return result.get("items", [])
+        except ApiKeyError:
+            raise  # 인증 오류는 빈 결과로 위장하지 않고 전파
         except Exception:
             return []
 
-    # 병렬 실행 (최대 12개월씩 묶어서 → API 과부하 방지)
+    results = await asyncio.gather(
+        *[_fetch_one(*r) for r in month_ranges(months_back)]
+    )
+
     all_items: list[dict] = []
     seen_ids: set[str] = set()
-    chunk_size = 12
-
-    for i in range(0, len(month_ranges), chunk_size):
-        chunk = month_ranges[i:i + chunk_size]
-        results = await asyncio.gather(*[_fetch_one(*r) for r in chunk])
-        for items in results:
-            for item in items:
-                uid = item.get("bidNtceNo", "") + item.get("bidNtceOrd", "")
-                if uid and uid not in seen_ids:
-                    seen_ids.add(uid)
-                    all_items.append(item)
+    for items in results:
+        for item in items:
+            uid = item.get("bidNtceNo", "") + item.get("bidNtceOrd", "")
+            if uid and uid not in seen_ids:
+                seen_ids.add(uid)
+                all_items.append(item)
 
     return all_items
 

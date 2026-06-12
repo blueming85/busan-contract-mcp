@@ -1,0 +1,5 @@
+# tools/busan_scraper.py (부산시청 계약정보 스크래퍼) 실행 시에만 필요
+# MCP 서버 자체는 requirements.txt만으로 동작합니다.
+selenium>=4.20.0
+webdriver-manager>=4.0.0
+beautifulsoup4>=4.12.0

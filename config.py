@@ -11,9 +11,8 @@ if _env_path.exists():
             os.environ.setdefault(k.strip(), v.strip())
 
 # 공공데이터포털 서비스 키
+# 미설정이어도 서버는 기동 가능 (도구 호출 시점에 ApiKeyError로 안내)
 SERVICE_KEY = os.environ.get("NARA_SERVICE_KEY", "")
-if not SERVICE_KEY:
-    raise RuntimeError(".env 파일에 NARA_SERVICE_KEY를 설정해주세요.")
 
 # 나라장터 API Base URL
 BASE_URL = "http://apis.data.go.kr/1230000"
@@ -33,3 +32,7 @@ ENDPOINTS = {
 # 기본 페이지 크기
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 999
+
+# 법제처 오픈API 인증 정보 (미설정 시 공유 키 사용)
+LAW_API_ID = os.environ.get("LAW_API_ID", "blueming85@gmail.com")
+LAW_API_OC = os.environ.get("LAW_API_OC", "busan_contract_mcp_2026")

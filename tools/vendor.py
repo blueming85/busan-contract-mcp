@@ -9,7 +9,7 @@ import re
 import asyncio
 from typing import Optional
 from config import ENDPOINTS
-from tools.api_client import fetch, parse_amount, format_amount
+from tools.api_client import fetch, parse_amount, format_amount, normalize_bizno
 
 
 # ─────────────────────────────────────────────
@@ -180,50 +180,107 @@ async def _get_awardees_from_history(
     return companies
 
 
+# 차세대 나라장터 부정당제재 오퍼레이션 (구 getIlgtBizEntpInfo02는 폐지됨)
+_DEBAR_OP = "getUnptRsttCorpInfo02"
+
+
 async def _fetch_debarred_all() -> list[dict]:
-    """부정당제재 전체 목록 (최근 3년)"""
+    """부정당제재 목록 (최근 5년 통보분, 전 페이지 페이징)
+
+    입찰참가자격 제한은 최장 2년이므로 5년 소급이면 현재 유효한 제재를 모두 포함.
+    응답 필드: bizno, corpNm, rsttBgnDate, rsttEndDate(YYYY-MM-DD), insttNm,
+              lawordNm, enfcPrvNm, unptRsttDocNm 등
+    """
     from datetime import datetime, timedelta
     now = datetime.now()
-    params = {
-        "numOfRows": 500,
-        "inqryDiv": "1",
-        "inqryBgnDt": (now - timedelta(days=365 * 3)).strftime("%Y%m%d0000"),
+    base_params = {
+        "inqryDiv": "2",  # 2 = 기간 조회
+        "inqryBgnDt": (now - timedelta(days=365 * 5)).strftime("%Y%m%d0000"),
         "inqryEndDt": now.strftime("%Y%m%d2359"),
     }
+    per_page = 999
     try:
-        result = await fetch(ENDPOINTS["user"], "getIlgtBizEntpInfo02", params)
+        first = await fetch(
+            ENDPOINTS["user"], _DEBAR_OP,
+            {**base_params, "numOfRows": per_page, "pageNo": 1},
+        )
+    except Exception:
+        return []
+
+    items = list(first.get("items", []))
+    total = first.get("totalCount", 0) or 0
+    # 안전 상한 20페이지 (약 2만건) — 정상적으로는 5년치 전체가 그 안에 들어옴
+    total_pages = min((total + per_page - 1) // per_page, 20)
+    if total_pages > 1:
+        results = await asyncio.gather(
+            *[
+                fetch(ENDPOINTS["user"], _DEBAR_OP,
+                      {**base_params, "numOfRows": per_page, "pageNo": p})
+                for p in range(2, total_pages + 1)
+            ],
+            return_exceptions=True,
+        )
+        for r in results:
+            if not isinstance(r, Exception):
+                items.extend(r.get("items", []))
+    return items
+
+
+async def _fetch_debarred_by_bizno(biz_no: str) -> list[dict]:
+    """사업자번호 단건 부정당제재 조회 (inqryDiv=1)"""
+    try:
+        result = await fetch(
+            ENDPOINTS["user"], _DEBAR_OP,
+            {"numOfRows": 100, "inqryDiv": "1", "bizno": normalize_bizno(biz_no)},
+        )
         return result.get("items", [])
     except Exception:
         return []
 
 
 def _classify_debarment(biz_no: str, debarred_items: list[dict]) -> dict:
-    """부정당제재 상태 → 🔴/🟡/🟢"""
+    """부정당제재 상태 → 🔴/🟡/🟢/⚪"""
     from datetime import datetime
     now = datetime.now()
 
-    matched = [i for i in debarred_items if i.get("bizno", "") == biz_no]
+    biz_no = normalize_bizno(biz_no)
+    if not biz_no:
+        return {"badge": "⚪", "label": "확인불가", "detail": "사업자번호 미확인 — 계약 전 수동 조회 필요"}
+
+    matched = [i for i in debarred_items if normalize_bizno(i.get("bizno", "")) == biz_no]
     if not matched:
         return {"badge": "🟢", "label": "이상없음", "detail": ""}
 
+    def _end_date(item: dict):
+        # 신 API: rsttEndDate(YYYY-MM-DD) / 구 API 호환: rgltEndDt(YYYYMMDD)
+        raw = (item.get("rsttEndDate") or item.get("rgltEndDt") or item.get("sanctEndDt") or "")
+        digits = raw.replace("-", "").replace(".", "")[:8]
+        try:
+            return datetime.strptime(digits, "%Y%m%d") if digits else None
+        except ValueError:
+            return None
+
+    def _reason(item: dict) -> str:
+        return (
+            item.get("enfcPrvNm") or item.get("lawordNm")
+            or item.get("rgltRsn") or item.get("sanctRsn") or "사유 미상"
+        )[:40]
+
     active, past = [], []
     for item in matched:
-        end_str = (item.get("rgltEndDt") or item.get("sanctEndDt") or "")[:8]
-        try:
-            end_dt = datetime.strptime(end_str, "%Y%m%d") if end_str else None
-        except ValueError:
-            end_dt = None
+        end_dt = _end_date(item)
         (active if (end_dt and end_dt >= now) else past).append(item)
 
     if active:
-        latest = sorted(active, key=lambda x: x.get("rgltEndDt") or "")[-1]
-        end_str = (latest.get("rgltEndDt") or latest.get("sanctEndDt") or "")[:8]
-        reason = (latest.get("rgltRsn") or latest.get("sanctRsn") or "사유 미상")[:40]
+        latest = max(active, key=lambda x: _end_date(x) or datetime.min)
+        end_dt = _end_date(latest)
+        end_str = end_dt.strftime("%Y-%m-%d") if end_dt else "미상"
         return {"badge": "🔴", "label": "계약불가",
-                "detail": f"제재종료: {end_str} / {reason}"}
+                "detail": f"제재종료: {end_str} / {_reason(latest)} ({latest.get('insttNm', '')})"}
     else:
-        latest = sorted(past, key=lambda x: x.get("rgltEndDt") or "")[-1]
-        end_str = (latest.get("rgltEndDt") or latest.get("sanctEndDt") or "")[:8]
+        latest = max(past, key=lambda x: _end_date(x) or datetime.min)
+        end_dt = _end_date(latest)
+        end_str = end_dt.strftime("%Y-%m-%d") if end_dt else "미상"
         return {"badge": "🟡", "label": "이력있음(해제)",
                 "detail": f"최근제재종료: {end_str}"}
 
@@ -293,8 +350,18 @@ async def search_companies(
         top_n:            최종 추천 수 (기본 10)
         months_back:      소급 개월 수 (기본 48개월)
     """
-    # 부정당제재 목록은 병렬로 미리 받아둠
+    # 부정당제재 목록 + 수의계약 데이터를 병렬로 미리 받아둠
     debarred_task = asyncio.create_task(_fetch_debarred_all())
+
+    from tools.contract import fetch_voluntary_contracts
+    voluntary_task = asyncio.create_task(
+        fetch_voluntary_contracts(
+            keyword=service_keyword,
+            biz_type=biz_type,
+            months_back=min(months_back, 24),
+            region=region,
+        )
+    )
 
     # ── 1단계: 직접 키워드 검색 ──
     companies = await _get_awardees_from_history(
@@ -303,32 +370,73 @@ async def search_companies(
 
     fallback_keyword = None
     fallback_note = ""
+    is_ai = _is_ai_related(service_keyword)
 
     # ── 2단계: 0건 처리 ──
     if not companies:
-        # AI/신기술 키워드 감지 → 자동 fallback 전에 제안 응답 반환
-        if _is_ai_related(service_keyword):
-            return _build_no_result_suggestion(service_keyword, is_ai=True)
-
-        # 일반 키워드 — 자동 축소 fallback (최대 24개월로 속도 제한)
-        fallback_months = min(months_back, 24)
-        shrunk = _shrink_keyword(service_keyword)
-        for alt_kw in shrunk:
-            companies = await _get_awardees_from_history(
-                alt_kw, biz_type, fallback_months, region
-            )
-            if companies:
-                fallback_keyword = alt_kw
-                fallback_note = (
-                    f"⚠️ '{service_keyword}' 직접 사례 없음 — "
-                    f"유사 키워드 '{alt_kw}' 기준 참고 사례 {len(companies)}건"
+        if not is_ai:
+            # 일반 키워드 — 자동 축소 fallback (최대 24개월로 속도 제한)
+            fallback_months = min(months_back, 24)
+            shrunk = _shrink_keyword(service_keyword)
+            for alt_kw in shrunk:
+                companies = await _get_awardees_from_history(
+                    alt_kw, biz_type, fallback_months, region
                 )
-                break
+                if companies:
+                    fallback_keyword = alt_kw
+                    fallback_note = (
+                        f"⚠️ '{service_keyword}' 직접 사례 없음 — "
+                        f"유사 키워드 '{alt_kw}' 기준 참고 사례 {len(companies)}건"
+                    )
+                    break
+        # AI 키워드는 fallback 축소 없이 수의계약 데이터로 보완 시도
 
     debarred_all = await debarred_task
+    voluntary_companies = await voluntary_task
+
+    # ── 수의계약 데이터 통합 ──
+    # 기존 낙찰 company_map 재구성 (사업자번호 or 업체명 키)
+    merged_map: dict[str, dict] = {}
+    for c in companies:
+        key = c["사업자번호"] or c["업체명"]
+        c.setdefault("수의계약횟수", 0)
+        merged_map[key] = c
+
+    for vc in voluntary_companies:
+        key = vc["사업자번호"] or vc["업체명"]
+        if key in merged_map:
+            c = merged_map[key]
+            c["수의계약횟수"] = c.get("수의계약횟수", 0) + vc["수의계약횟수"]
+            c["낙찰횟수"]    += vc["수의계약횟수"]
+            c["낙찰금액합계"] += vc["수의금액합계"]
+            if vc["수의금액합계"]:
+                c["낙찰금액목록"].extend([vc["수의금액합계"]])
+            for inst in vc["발주기관목록"]:
+                if inst not in c["발주기관목록"]:
+                    c["발주기관목록"].append(inst)
+            if vc["최근계약일"] > c.get("최근낙찰일", ""):
+                c["최근낙찰일"] = vc["최근계약일"]
+        else:
+            # 수의계약만 있는 신규 업체
+            merged_map[key] = {
+                "업체명":       vc["업체명"],
+                "사업자번호":   vc["사업자번호"],
+                "주소":         vc["주소"],
+                "낙찰횟수":     vc["수의계약횟수"],
+                "수의계약횟수": vc["수의계약횟수"],
+                "최근낙찰일":   vc["최근계약일"],
+                "낙찰금액합계": vc["수의금액합계"],
+                "낙찰금액목록": [],
+                "발주기관목록": vc["발주기관목록"],
+                "낙찰률":       "",
+                "is_local":    vc["is_local"],
+                "_출처":        "수의계약",
+            }
+
+    companies = list(merged_map.values())
 
     if not companies:
-        return _build_no_result_suggestion(service_keyword, is_ai=_is_ai_related(service_keyword))
+        return _build_no_result_suggestion(service_keyword, is_ai=is_ai)
 
     # ── 점수 계산 ──
     for c in companies:
@@ -414,31 +522,24 @@ async def check_debarred_vendors(
     biz_reg_no: Optional[str] = None,
 ) -> dict:
     """부정당제재 업체 조회 (계약 전 필수 확인)"""
-    from datetime import datetime, timedelta
-    now = datetime.now()
-    params = {
-        "numOfRows": 100,
-        "inqryDiv": "1",
-        "inqryBgnDt": (now - timedelta(days=365 * 3)).strftime("%Y%m%d0000"),
-        "inqryEndDt": now.strftime("%Y%m%d2359"),
-    }
-    try:
-        result = await fetch(ENDPOINTS["user"], "getIlgtBizEntpInfo02", params)
-        items = result.get("items", [])
-    except Exception as e:
-        return {
-            "is_debarred": None,
-            "message": f"API 조회 실패: {e}",
-            "items": [],
-        }
-
-    if corp_name:
-        items = [i for i in items if corp_name in (i.get("prcrmntCorpNm") or i.get("corpNm") or "")]
     if biz_reg_no:
-        items = [i for i in items if biz_reg_no == i.get("bizno", "")]
+        # 사업자번호가 있으면 단건 직접 조회 (가장 정확)
+        items = await _fetch_debarred_by_bizno(biz_reg_no)
+        if corp_name:
+            items = [i for i in items if corp_name in (i.get("corpNm") or i.get("prcrmntCorpNm") or "")]
+    else:
+        items = await _fetch_debarred_all()
+        if not items:
+            return {
+                "is_debarred": None,
+                "message": "부정당제재 목록 조회 실패 — API 키 또는 네트워크를 확인하세요.",
+                "items": [],
+            }
+        if corp_name:
+            items = [i for i in items if corp_name in (i.get("corpNm") or i.get("prcrmntCorpNm") or "")]
 
     if not items:
-        return {"is_debarred": False, "message": "부정당제재 이력 없음 (3년 기준)", "items": []}
+        return {"is_debarred": False, "message": "부정당제재 이력 없음 (최근 5년 통보 기준)", "items": []}
     return {
         "is_debarred": True,
         "message": f"⚠️ 부정당제재 이력 {len(items)}건! 계약 전 담당부서 협의 필수.",
