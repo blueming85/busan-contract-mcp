@@ -845,23 +845,45 @@ def _format_busan_ranking(result: dict) -> str:
 # 엔트리포인트
 # ──────────────────────────────────────────
 def _run_http():
-    from mcp.server.sse import SseServerTransport
+    from contextlib import asynccontextmanager
     from starlette.applications import Starlette
-    from starlette.routing import Route, Mount
+    from starlette.routing import Mount, Route
+    from starlette.responses import JSONResponse
     import uvicorn
 
-    sse = SseServerTransport("/messages/")
+    async def server_card(request):
+        return JSONResponse({
+            "name": "busan-contract-mcp",
+            "version": "1.0.0",
+            "description": "나라장터 OpenAPI 기반 지능형 조달 컨설팅 MCP 서버",
+        })
 
-    async def handle_sse(request):
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as streams:
-            await app.run(streams[0], streams[1], app.create_initialization_options())
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
-    starlette_app = Starlette(routes=[
-        Route("/sse", endpoint=handle_sse),
-        Mount("/messages/", app=sse.handle_post_message),
-    ])
+    session_manager = StreamableHTTPSessionManager(
+        app=app,
+        event_store=None,
+        json_response=False,
+        stateless=True,
+    )
+
+    async def handle_mcp(scope, receive, send):
+        await session_manager.handle_request(scope, receive, send)
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        async with session_manager.run():
+            yield
+
+    starlette_app = Starlette(
+        lifespan=lifespan,
+        routes=[
+            Route("/.well-known/mcp/server-card.json", endpoint=server_card),
+            Mount("/mcp", app=handle_mcp),
+            Mount("/sse", app=handle_mcp),
+            Mount("/", app=handle_mcp),
+        ],
+    )
 
     port = int(os.environ.get("PORT", "8000"))
     uvicorn.run(starlette_app, host="0.0.0.0", port=port)
