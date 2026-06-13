@@ -844,10 +844,36 @@ def _format_busan_ranking(result: dict) -> str:
 # ──────────────────────────────────────────
 # 엔트리포인트
 # ──────────────────────────────────────────
+def _run_http():
+    from mcp.server.sse import SseServerTransport
+    from starlette.applications import Starlette
+    from starlette.routing import Route, Mount
+    import uvicorn
+
+    sse = SseServerTransport("/messages/")
+
+    async def handle_sse(request):
+        async with sse.connect_sse(
+            request.scope, request.receive, request._send
+        ) as streams:
+            await app.run(streams[0], streams[1], app.create_initialization_options())
+
+    starlette_app = Starlette(routes=[
+        Route("/sse", endpoint=handle_sse),
+        Mount("/messages/", app=sse.handle_post_message),
+    ])
+
+    port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+
+
 async def main():
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if os.environ.get("MCP_TRANSPORT") == "http":
+        _run_http()
+    else:
+        asyncio.run(main())
